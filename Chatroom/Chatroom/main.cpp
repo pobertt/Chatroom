@@ -1,14 +1,11 @@
-// Dear ImGui: standalone example application for Windows API + DirectX 12
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h> 
 
-// Learn about Dear ImGui:
-// - FAQ                  https://dearimgui.com/faq
-// - Getting Started      https://dearimgui.com/getting-started
-// - Documentation        https://dearimgui.com/docs (same as your local docs/ folder).
-// - Introduction, links and more at the top of imgui.cpp
-
-#pragma comment(lib, "d3d12.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "Ws2_32.lib") 
+#pragma comment(lib, "d3d12.lib")       
+#pragma comment(lib, "dxgi.lib")        
+#pragma comment(lib, "d3dcompiler.lib") 
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -19,6 +16,9 @@
 
 #include <vector>
 #include <string>
+#include <iostream>
+
+#include "client.h"
 
 #ifdef _DEBUG
 #define DX12_ENABLE_DEBUG_LAYER
@@ -28,6 +28,8 @@
 #include <dxgidebug.h>
 #pragma comment(lib, "dxguid.lib")
 #endif
+
+NetworkClient g_Client;
 
 // Config for example app
 static const int APP_NUM_FRAMES_IN_FLIGHT = 2;
@@ -117,6 +119,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 // Main code
 int main(int, char**)
 {
+    // Initialize Winsock
+    if (!g_Client.Initialize()) {
+        return 1;
+    }
+
     // Make process DPI aware and obtain main monitor scale
     ImGui_ImplWin32_EnableDpiAwareness();
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
@@ -189,6 +196,7 @@ int main(int, char**)
     //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf");
     //IM_ASSERT(font != nullptr);
 
+    //----------------------------------------------------
 
     struct PrivateChat {
         std::string target_username;
@@ -216,15 +224,10 @@ int main(int, char**)
 
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
-
     // Main loop
     bool done = false;
     while (!done)
     {
-        // ---------------------------------------------------------
-         // LOGIC START
-         // ---------------------------------------------------------
-
         // Poll and handle messages (inputs, window resize, etc.)
         // See the WndProc() function below for our to dispatch events to the Win32 backend.
         MSG msg;
@@ -251,9 +254,14 @@ int main(int, char**)
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // ---------------------------------------------------------
-          // 1. LOGIN LOGIC
-          // ---------------------------------------------------------
+        std::string incomingMsg;
+        // Check if we received anything. The loop ensures we grab ALL waiting messages.
+        while (g_Client.ReceiveMessage(incomingMsg))
+        {
+            global_chat_history.push_back(incomingMsg);
+            global_scroll = true;
+        }
+
         if (!is_logged_in)
         {
             ImGui::SetNextWindowSize(ImVec2(300, 150), ImGuiCond_FirstUseEver);
@@ -263,21 +271,37 @@ int main(int, char**)
             if (ImGui::InputText("##User", username, IM_ARRAYSIZE(username), ImGuiInputTextFlags_EnterReturnsTrue)) {
                 if (strlen(username) > 0) { is_logged_in = true; active_users.push_back(std::string(username)); }
             }
-            if (ImGui::Button("Login")) {
-                if (strlen(username) > 0) { is_logged_in = true; active_users.push_back(std::string(username)); }
+
+            // Add a text box for IP (Temporary, just so you can change it)
+            static char ip[32] = "127.0.0.1";
+            ImGui::InputText("Server IP", ip, 32);
+
+            // Bug right now: Enter doesn't actually click the the connect button so it won't properly connect to the server.
+            if (ImGui::Button("Connect", ImVec2(-1, 0)))
+            {
+                if (strlen(username) > 0)
+                {
+                    if (g_Client.Connect("127.0.0.1", 8888))
+                    {
+                        std::cout << "[CLIENT] CONNECTED TO SERVER!" << std::endl;
+                        is_logged_in = true;
+                        active_users.push_back(std::string(username));
+                    }
+                    else
+                    {
+                        std::cout << "[CLIENT] CONNECT FAILED. Error: " << WSAGetLastError() << std::endl;
+                    }
+                }
             }
             ImGui::End();
         }
         else
         {
-            // ---------------------------------------------------------
-            // 2. MAIN GLOBAL CHAT WINDOW
-            // ---------------------------------------------------------
+            // Left Column/Title
             ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
             std::string main_title = "Global Chat - " + std::string(username);
             ImGui::Begin(main_title.c_str(), nullptr);
 
-            // --- LEFT COLUMN: USER LIST ---
             ImGui::BeginChild("UserList", ImVec2(150, 0), true);
             ImGui::TextDisabled("Double-click to DM");
             ImGui::Separator();
@@ -309,7 +333,7 @@ int main(int, char**)
 
             ImGui::SameLine();
 
-            // --- RIGHT COLUMN: GLOBAL CHAT ---
+            // Right Column: GLOBAL CHAT
             ImGui::BeginGroup();
             ImGui::BeginChild("GlobalLog", ImVec2(0, -35), true, ImGuiWindowFlags_HorizontalScrollbar);
             for (const auto& msg : global_chat_history) ImGui::TextWrapped("%s", msg.c_str());
@@ -333,11 +357,18 @@ int main(int, char**)
                 }
             }
             ImGui::SameLine();
-            if (ImGui::Button("Send", ImVec2(50, 0))) {
-                if (strlen(global_input) > 0) {
-                    global_chat_history.push_back(std::string(username) + ": " + global_input);
+            if (ImGui::Button("Send", ImVec2(50, 0)))
+            {
+                if (strlen(global_input) > 0)
+                {
+                    // Format the message (Name: Message)
+                    std::string final_msg = std::string(username) + ": " + std::string(global_input);
+
+                    // SEND TO SERVER
+                    g_Client.SendMessage(final_msg);
+
+                    // Clear input box and refocus
                     global_input[0] = '\0';
-                    global_scroll = true;
                     reclaim_focus = true;
                 }
             }
@@ -345,9 +376,7 @@ int main(int, char**)
             ImGui::EndGroup();
             ImGui::End(); // End Main Window
 
-            // ---------------------------------------------------------
-            // 3. PRIVATE CHAT WINDOWS (Render all open sessions)
-            // ---------------------------------------------------------
+            // Private Chat
             // We use a separate loop to render independent windows for each private chat
             for (int i = 0; i < open_private_chats.size(); i++)
             {
@@ -359,7 +388,7 @@ int main(int, char**)
 
                 ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
 
-                // Pass &chat.is_open so the "X" button actually closes the window
+                // Ref closes the window
                 if (ImGui::Begin(window_name.c_str(), &chat.is_open))
                 {
                     ImGui::BeginChild("ChatLog", ImVec2(0, -35), true);
@@ -386,12 +415,18 @@ int main(int, char**)
                         }
                     }
                     ImGui::SameLine();
-                    if (ImGui::Button("Send")) {
-                        if (strlen(chat.input_buf) > 0) {
-                            chat.messages.push_back(std::string(username) + ": " + chat.input_buf);
-                            chat.input_buf[0] = '\0';
-                            chat.scroll_to_bottom = true;
-                            private_reclaim = true;
+                    if (ImGui::Button("Send", ImVec2(50, 0)))
+                    {
+                        if (strlen(global_input) > 0)
+                        {
+                            std::string final_msg = std::string(username) + ": " + std::string(global_input);
+
+                            // Send to Server
+                            g_Client.SendMessage(final_msg);
+
+                            // Clear input
+                            global_input[0] = '\0';
+                            reclaim_focus = true;
                         }
                     }
                     if (private_reclaim) ImGui::SetKeyboardFocusHere(-1);
@@ -400,14 +435,10 @@ int main(int, char**)
             }
 
             // Clean up closed chats from the list
-             // (Simple way: recreate list. Efficient enough for small lists)
             std::vector<PrivateChat> remaining_chats;
             for (const auto& c : open_private_chats) if (c.is_open) remaining_chats.push_back(c);
             open_private_chats = remaining_chats;
         }
-        // ---------------------------------------------------------
-        // LOGIC END
-        // ---------------------------------------------------------
 
         //----------------------------------------------------
 
@@ -489,6 +520,8 @@ int main(int, char**)
     }
 
     WaitForPendingOperations();
+
+    g_Client.Shutdown();
 
     // Cleanup
     ImGui_ImplDX12_Shutdown();
