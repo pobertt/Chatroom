@@ -20,7 +20,8 @@
 #include <vector>
 #include <string>
 #include <iostream>
-
+#include <mutex>
+#include <ctime> 
 
 #include "client.h"
 
@@ -118,6 +119,98 @@ void WaitForPendingOperations();
 FrameContext* WaitForNextFrameContext();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+// Private Chats State
+struct PrivateChat {
+    std::string target_username;
+    std::vector<std::string> messages;
+    char input_buf[256] = "";
+    bool is_open = true;
+    bool scroll_to_bottom = false;
+};
+std::vector<PrivateChat> open_private_chats;
+
+// Global Chat State
+std::vector<std::string> global_chat_history;
+char global_input[256] = "";
+bool global_scroll = false;
+
+// Active Users List
+std::vector<std::string> active_users = {};
+
+// Login State
+char username[64] = "";
+bool is_logged_in = false;
+bool show_window = true;
+ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+
+// -----------------------------------------
+
+// Get current time as string [HH:MM]
+std::string GetTimeStr() {
+    time_t now = time(0);
+    struct tm tstruct;
+    char buf[80];
+    localtime_s(&tstruct, &now);
+    strftime(buf, sizeof(buf), "[%H:%M] ", &tstruct);
+    return std::string(buf);
+}
+
+// RENDER CHAT HISTORY 
+void DrawChatLog(const std::vector<std::string>& history, const std::string& myName, bool& scrollToBottom) {
+    ImGui::BeginChild("Log", ImVec2(0, -35), true);
+    for (const auto& msg : history) {
+        if (msg.find("System:") != std::string::npos)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.0f, 1.0f)); // Yellow
+        else if (msg.find(myName + ":") != std::string::npos)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f)); // Green
+        else
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)); // White
+
+        ImGui::TextWrapped("%s", msg.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (scrollToBottom) {
+        ImGui::SetScrollHereY(1.0f);
+        scrollToBottom = false;
+    }
+    ImGui::EndChild();
+}
+
+// RENDER INPUT AREA
+bool DrawInputArea(const char* label, char* buffer, size_t bufferSize) {
+    bool reclaim_focus = false;
+    bool enter_pressed = ImGui::InputTextWithHint(label, "Type here...", buffer, bufferSize, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    bool btn_clicked = ImGui::Button("Send");
+
+    if ((enter_pressed || btn_clicked) && strlen(buffer) > 0) {
+        reclaim_focus = true;
+    }
+    if (reclaim_focus) ImGui::SetKeyboardFocusHere(-1);
+    return reclaim_focus;
+}
+
+// Updates active_users
+void UpdateUserList(std::string names) {
+    active_users.clear();
+    size_t pos = 0;
+    while ((pos = names.find(",")) != std::string::npos) {
+        active_users.push_back(names.substr(0, pos));
+        names.erase(0, pos + 1);
+    }
+    if (!names.empty()) active_users.push_back(names);
+}
+
+// Finds/Creates chat window
+PrivateChat& GetOrCreatePrivateWindow(const std::string& targetUser) {
+    for (auto& chat : open_private_chats) {
+        if (chat.target_username == targetUser) return chat;
+    }
+    PrivateChat new_chat;
+    new_chat.target_username = targetUser;
+    open_private_chats.push_back(new_chat);
+    return open_private_chats.back();
+}
 // Main code
 int main(int, char**)
 {
@@ -195,42 +288,24 @@ int main(int, char**)
 
     //----------------------------------------------------
 
-    struct PrivateChat {
-        std::string target_username;
-        std::vector<std::string> messages;
-        char input_buf[256] = "";
-        bool is_open = true;
-        bool scroll_to_bottom = false;
-    };
+    style.WindowRounding = 8.0f;     // Round window corners
+    style.FrameRounding = 5.0f;      // Round buttons and inputs
+    style.ScrollbarRounding = 5.0f;  // Round scrollbars
+    style.GrabRounding = 5.0f;       // Round sliders
 
-    // Global Chat State
-    static std::vector<std::string> global_chat_history;
-    static char global_input[256] = "";
-    static bool global_scroll = false;
+    // colours
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_WindowBg] = ImVec4(0.12f, 0.12f, 0.14f, 1.00f); // Dark Grey Background
+    colors[ImGuiCol_Header] = ImVec4(0.20f, 0.25f, 0.30f, 1.00f);   // Blue-ish headers
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.26f, 0.59f, 0.98f, 0.80f); // Highlight
+    colors[ImGuiCol_Button] = ImVec4(0.20f, 0.25f, 0.30f, 1.00f);   // Dark Blue Buttons
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.26f, 0.59f, 0.98f, 1.00f); // Bright Blue Hover
 
-    // Active Users List
-    static std::vector<std::string> active_users = {};
-
-    // Private Chats State
-    static std::vector<PrivateChat> open_private_chats;
-
-    // Login State
-    static char username[64] = "";
-    bool is_logged_in = false;
-    bool show_window = true;
-
-    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
-
-    // ... (Your ImGui setup code) ...
-
-    // 1. Initialize COM (Required for XAudio2 / GamesEngineeringBase)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
-    // 2. Setup Sound Manager
-    // Use the namespace from the header you uploaded
     GamesEngineeringBase::SoundManager audio;
 
-    // 3. Load your WAV files (Make sure these files exist in your project folder!)
+    // Load WAV 
     audio.load("chatroomsound.wav");
     audio.load("chatroomprivate.wav");
 
@@ -264,264 +339,133 @@ int main(int, char**)
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // --- COMPLETE MESSAGE PARSING BLOCK ---
+        // Message processing
         {
-            // 1. Lock the shared memory so threads don't clash
             std::lock_guard<std::mutex> lock(chat_mutex);
 
-            // 2. Process every waiting message
             for (const std::string& msg : chat_messages)
             {
-                // CASE A: User List Update ("/users:...")
+                // User List Update
                 if (msg.find("/users:") == 0)
                 {
-                    active_users.clear();
-                    std::string names = msg.substr(7);
-
-                    size_t pos = 0;
-                    while ((pos = names.find(",")) != std::string::npos) {
-                        active_users.push_back(names.substr(0, pos));
-                        names.erase(0, pos + 1);
-                    }
-                    if (!names.empty()) active_users.push_back(names);
+                    UpdateUserList(msg.substr(7));
                 }
-                // CASE B: Private Message ("/private:...")
+
+                // Private Message
                 else if (msg.find("/private:") == 0)
                 {
+                    // Parse Data
                     std::string rest = msg.substr(9);
                     size_t split = rest.find(":");
+
                     if (split != std::string::npos)
                     {
-                        std::string senderName = rest.substr(0, split);
+                        std::string sender = rest.substr(0, split);
                         std::string content = rest.substr(split + 1);
 
-                        bool found = false;
-                        for (auto& chat : open_private_chats) {
-                            if (chat.target_username == senderName) {
-                                chat.messages.push_back(senderName + ": " + content);
-                                chat.scroll_to_bottom = true;
-                                if (!chat.is_open) chat.is_open = true;
-                                found = true;
-                                break;
-                            }
+                        // Format Display String
+                        std::string displayMsg;
+                        if (content.length() >= 8 && content[0] == '[') {
+                            displayMsg = content.substr(0, 8) + sender + ": " + content.substr(8);
+                        }
+                        else {
+                            displayMsg = sender + ": " + content;
                         }
 
-                        if (!found) {
-                            PrivateChat new_chat;
-                            new_chat.target_username = senderName;
-                            new_chat.messages.push_back(senderName + ": " + content);
-                            open_private_chats.push_back(new_chat);
-                        }
+                        // Update Window
+                        PrivateChat& chat = GetOrCreatePrivateWindow(sender);
+                        chat.messages.push_back(displayMsg);
+                        chat.scroll_to_bottom = true;
+                        chat.is_open = true;
 
+                        // Play Sound
                         audio.play("chatroomprivate.wav");
                     }
                 }
-                // CASE C: Normal Chat
+
+                // Global Chat
                 else
                 {
+                    if (msg.length() < 2) continue;
+
                     global_chat_history.push_back(msg);
                     global_scroll = true;
 
-                    if (msg.find(std::string(username) + ":") != 0)
-                    {
+                    if (msg.find(std::string(username) + ":") == std::string::npos) {
                         audio.play("chatroomsound.wav");
                     }
                 }
             }
-
-            // 3. CRITICAL FIX: Clear the queue so we don't process these again!
             chat_messages.clear();
+        }
 
-        } // <--- Lock releases here
-
-        if (!is_logged_in)
-        {
+        if (!is_logged_in) {
             ImGui::SetNextWindowSize(ImVec2(300, 200), ImGuiCond_FirstUseEver);
             ImGui::Begin("Login", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
-
-            // 1. Username Input (Pressing Enter sets 'attempt_login' to true)
-            ImGui::Text("Username:");
-            ImGui::SameLine();
-            bool user_enter = ImGui::InputText("##User", username, IM_ARRAYSIZE(username), ImGuiInputTextFlags_EnterReturnsTrue);
-
-            // 2. IP Input (Pressing Enter sets 'attempt_login' to true)
+            ImGui::Text("Username:"); ImGui::SameLine();
+            bool u_ent = ImGui::InputText("##U", username, 64, ImGuiInputTextFlags_EnterReturnsTrue);
             static char ip[32] = "127.0.0.1";
-            ImGui::Text("Server IP:");
-            ImGui::SameLine();
-            bool ip_enter = ImGui::InputText("##IP", ip, 32, ImGuiInputTextFlags_EnterReturnsTrue);
-
+            ImGui::Text("Server IP:"); ImGui::SameLine();
+            bool i_ent = ImGui::InputText("##I", ip, 32, ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::Spacing();
-
-            // 3. Connect Button
-            bool btn_click = ImGui::Button("Connect", ImVec2(-1, 0));
-
-            // --- UNIFIED CONNECTION LOGIC ---
-            // Triggers if you press Enter in either box OR click the button
-            if (user_enter || ip_enter || btn_click)
-            {
-                if (strlen(username) > 0)
-                {
-                    // Actually try to connect to the network
-                    if (Connect(ip))
-                    {
-                        std::cout << "[CLIENT] CONNECTED TO SERVER!" << std::endl;
-                        is_logged_in = true;
-
-                        // Send our name immediately so Server adds us to the list
-                        SendString(username);
-
-                        // Note: We do NOT need to manually add to active_users.
-                        // The server will send us the list in a split second.
-                    }
-                    else
-                    {
-                        std::cout << "[CLIENT] CONNECT FAILED. Error: " << WSAGetLastError() << std::endl;
-                        // Optional: ImGui::OpenPopup("Connection Failed"); 
-                    }
+            if ((u_ent || i_ent || ImGui::Button("Connect")) && strlen(username) > 0) {
+                if (Connect(ip)) {
+                    is_logged_in = true;
+                    SendString(username);
                 }
             }
             ImGui::End();
         }
-        else
-        {
-            // Left Column/Title
+        else {
+            // GLOBAL WINDOW
             ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
-            std::string main_title = "Global Chat - " + std::string(username);
-            ImGui::Begin(main_title.c_str(), nullptr);
+            ImGui::Begin(("Global Chat - " + std::string(username)).c_str());
 
             ImGui::BeginChild("UserList", ImVec2(150, 0), true);
-            ImGui::TextDisabled("Double-click to DM");
-            ImGui::Separator();
-
-            for (const auto& user : active_users)
-            {
-                // Selectable allows clicking. We use it to detect double clicks.
-                // We pass 'false' for 'selected' because we don't need selection highlighting here.
+            ImGui::TextDisabled("Users"); ImGui::Separator();
+            for (const auto& user : active_users) {
                 ImGui::Selectable(user.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
-
-                // DETECT DOUBLE CLICK
-                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
-                {
-                    // Check if chat is already open to avoid duplicates
-                    bool already_open = false;
-                    for (auto& chat : open_private_chats) {
-                        if (chat.target_username == user) { already_open = true; break; }
-                    }
-
-                    // Open new private chat if not open (and not chatting with self)
-                    if (!already_open && user != std::string(username)) {
-                        PrivateChat new_chat;
-                        new_chat.target_username = user;
-                        open_private_chats.push_back(new_chat);
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    bool exists = false;
+                    for (auto& c : open_private_chats) if (c.target_username == user) exists = true;
+                    if (!exists && user != std::string(username)) {
+                        PrivateChat pc; pc.target_username = user;
+                        open_private_chats.push_back(pc);
                     }
                 }
             }
             ImGui::EndChild();
-
             ImGui::SameLine();
 
-            // Right Column: GLOBAL CHAT
             ImGui::BeginGroup();
-            ImGui::BeginChild("GlobalLog", ImVec2(0, -35), true, ImGuiWindowFlags_HorizontalScrollbar);
-            for (const auto& msg : global_chat_history) ImGui::TextWrapped("%s", msg.c_str());
-            if (global_scroll || (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())) {
-                ImGui::SetScrollHereY(1.0f); global_scroll = false;
-            }
-            ImGui::EndChild();
-
-            ImGui::Separator();
-
-            // --- FIXED GLOBAL INPUT ---
-            float width = ImGui::GetContentRegionAvail().x;
-            ImGui::SetNextItemWidth(width - 60.0f);
-            bool reclaim_focus = false;
-
-            // 1. Capture both Enter and Click events
-            bool enter_pressed = ImGui::InputText("##GlobalInput", global_input, IM_ARRAYSIZE(global_input), ImGuiInputTextFlags_EnterReturnsTrue);
-            ImGui::SameLine();
-            bool button_clicked = ImGui::Button("Send", ImVec2(50, 0));
-
-            // 2. Unified Logic: If either happened, SEND TO SERVER
-            if ((enter_pressed || button_clicked) && strlen(global_input) > 0)
-            {
-                // Format: "Name: Message"
-                std::string final_msg = std::string(username) + ": " + std::string(global_input);
-
-                // CRITICAL: Actually send the data!
-                SendString(final_msg);
-
+            DrawChatLog(global_chat_history, username, global_scroll);
+            if (DrawInputArea("##Global", global_input, 256)) {
+                std::string final = std::string(username) + ": " + global_input;
+                SendString(final);
                 global_input[0] = '\0';
-                global_scroll = true;
-                reclaim_focus = true;
             }
-
-            if (reclaim_focus) ImGui::SetKeyboardFocusHere(-1);
-
             ImGui::EndGroup();
-            ImGui::End(); // End Main Window
+            ImGui::End();
 
-            // Private Chat
-            // We use a separate loop to render independent windows for each private chat
-            for (int i = 0; i < open_private_chats.size(); i++)
-            {
-                PrivateChat& chat = open_private_chats[i];
+            // PRIVATE WINDOWS
+            for (auto& chat : open_private_chats) {
                 if (!chat.is_open) continue;
-
-                // Create a unique name for the window so ImGui doesn't get confused
-                std::string window_name = "DM with " + chat.target_username + "###" + chat.target_username;
-
                 ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
+                std::string title = "DM with " + chat.target_username + "###" + chat.target_username;
 
-                // Ref closes the window
-                if (ImGui::Begin(window_name.c_str(), &chat.is_open))
-                {
-                    ImGui::BeginChild("ChatLog", ImVec2(0, -35), true);
-                    for (const auto& msg : chat.messages) ImGui::TextWrapped("%s", msg.c_str());
-
-                    if (chat.scroll_to_bottom || (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())) {
-                        ImGui::SetScrollHereY(1.0f); chat.scroll_to_bottom = false;
-                    }
-                    ImGui::EndChild();
-
-                    ImGui::Separator();
-
-                    // --- FIXED PRIVATE INPUT ---
-                    bool private_reclaim = false;
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 60.0f);
-                    std::string input_label = "##Input" + chat.target_username;
-
-                    // 1. Capture events
-                    bool priv_enter = ImGui::InputText(input_label.c_str(), chat.input_buf, 256, ImGuiInputTextFlags_EnterReturnsTrue);
-                    ImGui::SameLine();
-                    bool priv_click = ImGui::Button("Send", ImVec2(50, 0));
-
-                    // 2. Unified Logic
-                    if ((priv_enter || priv_click) && strlen(chat.input_buf) > 0)
-                    {
-                        // A. Format for Server: "/private:TARGET:MESSAGE"
-                        std::string serverMsg = "/private:" + chat.target_username + ":" + std::string(chat.input_buf);
-
-                        // B. Send to network
-                        SendString(serverMsg);
-
-                        // C. Local Echo (Show it on MY screen immediately)
-                        chat.messages.push_back(std::string(username) + ": " + chat.input_buf);
-
-                        // D. Cleanup
+                if (ImGui::Begin(title.c_str(), &chat.is_open)) {
+                    DrawChatLog(chat.messages, username, chat.scroll_to_bottom);
+                    std::string label = "##P" + chat.target_username;
+                    if (DrawInputArea(label.c_str(), chat.input_buf, 256)) {
+                        SendString("/private:" + chat.target_username + ":" + chat.input_buf);
+                        // Local Echo with time
+                        chat.messages.push_back(GetTimeStr() + std::string(username) + ": " + chat.input_buf);
                         chat.input_buf[0] = '\0';
                         chat.scroll_to_bottom = true;
-                        private_reclaim = true;
                     }
-
-                    if (private_reclaim) ImGui::SetKeyboardFocusHere(-1);
                 }
                 ImGui::End();
             }
-
-            // Clean up closed chats from the list
-            std::vector<PrivateChat> remaining_chats;
-            for (const auto& c : open_private_chats) if (c.is_open) remaining_chats.push_back(c);
-            open_private_chats = remaining_chats;
         }
 
         //----------------------------------------------------
