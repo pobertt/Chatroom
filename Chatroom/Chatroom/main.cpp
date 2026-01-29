@@ -29,8 +29,6 @@
 #pragma comment(lib, "dxguid.lib")
 #endif
 
-NetworkClient g_Client;
-
 // Config for example app
 static const int APP_NUM_FRAMES_IN_FLIGHT = 2;
 static const int APP_NUM_BACK_BUFFERS = 2;
@@ -119,11 +117,6 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 // Main code
 int main(int, char**)
 {
-    // Initialize Winsock
-    if (!g_Client.Initialize()) {
-        return 1;
-    }
-
     // Make process DPI aware and obtain main monitor scale
     ImGui_ImplWin32_EnableDpiAwareness();
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
@@ -212,7 +205,7 @@ int main(int, char**)
     static bool global_scroll = false;
 
     // Active Users List
-    static std::vector<std::string> active_users = { "System", "Admin", "Alex" }; // Added Alex for testing
+    static std::vector<std::string> active_users = {};
 
     // Private Chats State
     static std::vector<PrivateChat> open_private_chats;
@@ -255,11 +248,13 @@ int main(int, char**)
         ImGui::NewFrame();
 
         std::string incomingMsg;
-        // Check if we received anything. The loop ensures we grab ALL waiting messages.
-        while (g_Client.ReceiveMessage(incomingMsg))
         {
-            global_chat_history.push_back(incomingMsg);
-            global_scroll = true;
+            std::lock_guard<std::mutex> lock(chat_mutex);
+            for (const std::string& msg : chat_messages) {
+                global_chat_history.push_back(msg);
+                global_scroll = true;
+            }
+            chat_messages.clear();
         }
 
         if (!is_logged_in)
@@ -281,10 +276,14 @@ int main(int, char**)
             {
                 if (strlen(username) > 0)
                 {
-                    if (g_Client.Connect("127.0.0.1", 8888))
+                    if (Connect("127.0.0.1"))
                     {
                         std::cout << "[CLIENT] CONNECTED TO SERVER!" << std::endl;
                         is_logged_in = true;
+
+                        // Send our name immediately so Server knows who we are
+                        SendString(username);
+
                         active_users.push_back(std::string(username));
                     }
                     else
@@ -365,7 +364,7 @@ int main(int, char**)
                     std::string final_msg = std::string(username) + ": " + std::string(global_input);
 
                     // SEND TO SERVER
-                    g_Client.SendMessage(final_msg);
+                    SendString(final_msg);
 
                     // Clear input box and refocus
                     global_input[0] = '\0';
@@ -422,7 +421,7 @@ int main(int, char**)
                             std::string final_msg = std::string(username) + ": " + std::string(global_input);
 
                             // Send to Server
-                            g_Client.SendMessage(final_msg);
+                            SendString(final_msg);
 
                             // Clear input
                             global_input[0] = '\0';
@@ -521,7 +520,11 @@ int main(int, char**)
 
     WaitForPendingOperations();
 
-    g_Client.Shutdown();
+    // The OS cleans up sockets on exit, or you can manually close:
+    if (global_socket != INVALID_SOCKET) {
+        closesocket(global_socket);
+        WSACleanup();
+    }
 
     // Cleanup
     ImGui_ImplDX12_Shutdown();
