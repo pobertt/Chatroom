@@ -202,7 +202,7 @@ void UpdateUserList(std::string names) {
 }
 
 // Finds/Creates chat window
-PrivateChat& GetOrCreatePrivateWindow(const std::string& targetUser) {
+PrivateChat& CreatePrivateWindow(const std::string& targetUser) {
     for (auto& chat : open_private_chats) {
         if (chat.target_username == targetUser) return chat;
     }
@@ -373,7 +373,7 @@ int main(int, char**)
                         }
 
                         // Update Window
-                        PrivateChat& chat = GetOrCreatePrivateWindow(sender);
+                        PrivateChat& chat = CreatePrivateWindow(sender);
                         chat.messages.push_back(displayMsg);
                         chat.scroll_to_bottom = true;
                         chat.is_open = true;
